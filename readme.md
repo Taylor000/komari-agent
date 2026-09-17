@@ -22,7 +22,3 @@ curl -fsSL https://raw.githubusercontent.com/Taylor000/komari-agent/main/install
 ```
 
 安装后默认关闭自动更新。所有二进制均从本仓库 Release 下载并校验 SHA-256。
-
-## 发布
-
-`main` 更新后会自动发布两个版本，也可在 GitHub Actions 中手动重跑 `Publish supported agent`。
