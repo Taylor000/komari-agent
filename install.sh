@@ -247,6 +247,11 @@ uninstall_previous
 install_dependencies() {
     log_step "Checking and installing dependencies..."
 
+    if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+        log_success "Dependencies already satisfied"
+        return
+    fi
+
     local deps="curl"
     local missing_deps=""
     for cmd in $deps; do
@@ -294,6 +299,17 @@ install_dependencies() {
         log_success "Dependencies installed successfully"
     else
         log_success "Dependencies already satisfied"
+    fi
+}
+
+download_file() {
+    source_url="$1"
+    destination="$2"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --connect-timeout 15 -o "$destination" "$source_url"
+    else
+        wget -q --timeout=15 --tries=1 -O "$destination" "$source_url"
     fi
 }
 
@@ -390,7 +406,7 @@ dl_ok=""
 for u in $download_urls; do
     log_step "Downloading $file_name ..."
     log_info "URL: ${CYAN}$u${NC}"
-    if curl -fL --connect-timeout 15 -o "$komari_agent_path" "$u" && [ -s "$komari_agent_path" ]; then
+    if download_file "$u" "$komari_agent_path" && [ -s "$komari_agent_path" ]; then
         dl_ok=1
         break
     fi
@@ -417,7 +433,7 @@ https://ghproxy.net/${checksum_url}
 fi
 checksum_ok=""
 for u in $checksum_urls; do
-    if curl -fsL --connect-timeout 15 -o "$checksum_file" "$u"; then
+    if download_file "$u" "$checksum_file"; then
         checksum_ok=1
         break
     fi
