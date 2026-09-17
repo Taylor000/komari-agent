@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+      - self-hosted
+  pull_request:
 
 jobs:
   build:
@@ -44,7 +46,7 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME=${BINARY_NAME}.exe
           fi
-          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
+          go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari-agent/update.Repo=Taylor000/komari-agent" -o $BINARY_NAME
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -35,18 +35,21 @@ log_config() {
     echo -e "${CYAN}[CONFIG]${NC} $1"
 }
 
-# $EUID 是 bash 专有变量, ash/dash 下未定义, 补 POSIX 回退
-EUID=${EUID:-$(id -u)}
+# Use a private variable because Bash exposes EUID as read-only.
+current_uid=$(id -u)
 
 # Default values
+repository="Taylor000/komari-agent"
+default_version="1.2.0"
 service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
-install_version="" # New parameter for specifying version
+install_version="$default_version"
 install_dir_specified=false
 install_no_mirror=false # 关闭自动加速镜像
 service_user="${SUDO_USER:-$(id -un)}"
 user_service=false
+enable_auto_update=false
 
 # Detect OS
 os_type=$(uname -s)
@@ -55,7 +58,7 @@ case $os_type in
         os_name="darwin"
         target_dir="/usr/local/komari"  # Use /usr/local on macOS
         # Check if we can write to /usr/local, fallback to user directory
-        if [ ! -w "/usr/local" ] && [ "$EUID" -ne 0 ]; then
+        if [ ! -w "/usr/local" ] && [ "$current_uid" -ne 0 ]; then
             target_dir="$HOME/.komari"
             log_info "No write permission to /usr/local, using user directory: $target_dir"
         fi
@@ -102,6 +105,10 @@ while [ $# -gt 0 ]; do
             install_no_mirror=true
             shift
             ;;
+        --install-enable-auto-update)
+            enable_auto_update=true
+            shift
+            ;;
         --install*)
             log_warning "Unknown install parameter: $1"
             shift
@@ -118,7 +125,7 @@ done
 komari_args="${komari_args# }"
 
 # A direct, unprivileged installation belongs entirely to the invoking user.
-if [ "$EUID" -ne 0 ] && [ "$install_dir_specified" = false ]; then
+if [ "$current_uid" -ne 0 ] && [ "$install_dir_specified" = false ]; then
     case "$os_name" in
         linux|freebsd)
             target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/komari"
@@ -126,10 +133,33 @@ if [ "$EUID" -ne 0 ] && [ "$install_dir_specified" = false ]; then
     esac
 fi
 
+# This self-hosted distribution intentionally supports only two frozen versions.
+case "$install_version" in
+    1.1.93|1.93)
+        install_version="1.1.93"
+        ;;
+    1.2.0|1.20)
+        install_version="1.2.0"
+        ;;
+    *)
+        log_error "Unsupported agent version: $install_version"
+        log_info "Supported versions: 1.1.93 and 1.2.0"
+        exit 1
+        ;;
+esac
+
+# Keep installations pinned unless auto-update is explicitly enabled.
+if [ "$enable_auto_update" != true ]; then
+    case " $komari_args " in
+        *" --disable-auto-update "*) ;;
+        *) komari_args="${komari_args:+$komari_args }--disable-auto-update" ;;
+    esac
+fi
+
 komari_agent_path="${target_dir}/agent"
 
 # User services are the only service type a non-root Linux installation can manage.
-if [ "$EUID" -ne 0 ] && [ "$os_name" = "linux" ]; then
+if [ "$current_uid" -ne 0 ] && [ "$os_name" = "linux" ]; then
     if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
         user_service=true
     else
@@ -149,11 +179,8 @@ log_config "  Service user: ${GREEN}$service_user${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-(direct)}${NC}"
 log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
-if [ -n "$install_version" ]; then
-    log_config "  Specified agent version: ${GREEN}$install_version${NC}"
-else
-    log_config "  Agent version: ${GREEN}Latest${NC}"
-fi
+log_config "  Agent version: ${GREEN}$install_version${NC}"
+log_config "  Release repository: ${GREEN}$repository${NC}"
 echo ""
 
 # Function to uninstall the previous installation
@@ -229,7 +256,7 @@ install_dependencies() {
     done
 
     if [ -n "$missing_deps" ]; then
-        if [ "$EUID" -ne 0 ]; then
+        if [ "$current_uid" -ne 0 ]; then
             log_error "Missing required dependencies:$missing_deps"
             log_info "Install them with your system package manager, then run this script again."
             exit 1
@@ -319,79 +346,31 @@ case $arch in
 esac
 log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
 
-file_name="komari-agent-${os_name}-${arch}"
-
-resolve_snapshot_version() {
-    snapshot_api_url="https://api.github.com/repos/komari-monitor/komari-agent/releases?per_page=100"
-    if [ -n "$github_proxy" ]; then
-        snapshot_api_urls="${github_proxy}/${snapshot_api_url} ${snapshot_api_url}"
-    else
-        snapshot_api_urls="$snapshot_api_url"
-    fi
-
-    for api_url in $snapshot_api_urls; do
-        if ! releases_json=$(curl -fsSL --connect-timeout 15 \
-            -H "Accept: application/vnd.github+json" \
-            -H "User-Agent: komari-agent-installer" \
-            "$api_url"); then
-            releases_json=""
-        fi
-
-        if [ -n "$releases_json" ]; then
-            RESOLVED_SNAPSHOT_VERSION=$(printf '%s\n' "$releases_json" |
-                grep -o '"tag_name":[[:space:]]*"Snapshot-[^"]*"' |
-                sed 's/.*"\(Snapshot-[^"]*\)".*/\1/' |
-                LC_ALL=C sort -r |
-                head -n 1)
-            if [ -n "$RESOLVED_SNAPSHOT_VERSION" ]; then
-                return 0
-            fi
-        fi
-
-        if [ "$api_url" != "$snapshot_api_url" ]; then
-            log_warning "Failed to resolve snapshot releases through GitHub proxy, retrying directly."
-        fi
-    done
-
-    return 1
-}
-
-version_to_install="latest"
-if [ -n "$install_version" ]; then
-    if [ "$install_version" = "snapshot" ]; then
-        log_info "Resolving the latest snapshot version..."
-        if ! resolve_snapshot_version; then
-            log_error "Failed to resolve the latest snapshot version."
-            exit 1
-        fi
-        version_to_install="$RESOLVED_SNAPSHOT_VERSION"
-        log_success "Latest snapshot version: ${GREEN}$version_to_install${NC}"
-    else
-        log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
-        version_to_install="$install_version"
-    fi
-else
-    log_info "No version specified, installing the latest version."
-fi
+version_to_install="$install_version"
+log_info "Installing pinned version: ${GREEN}$version_to_install${NC}"
 
 # Construct download URL
-if [ "$version_to_install" = "latest" ]; then
-    download_path="latest/download"
-else
-    download_path="download/${version_to_install}"
+file_name="komari-agent-${os_name}-${arch}"
+if [ "$os_name" = "windows" ]; then
+    file_name="${file_name}.exe"
+    komari_agent_path="${komari_agent_path}.exe"
 fi
+download_path="download/${version_to_install}"
+release_base_url="https://github.com/${repository}/releases/${download_path}"
 
 if [ -n "$github_proxy" ]; then
     # Use proxy for GitHub releases
-    download_url="${github_proxy}/https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="${github_proxy}/${release_base_url}/${file_name}"
+    checksum_url="${github_proxy}/${release_base_url}/SHA256SUMS"
 else
     # Direct access to GitHub releases
-    download_url="https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="${release_base_url}/${file_name}"
+    checksum_url="${release_base_url}/SHA256SUMS"
 fi
 
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
 mkdir -p "$target_dir"
-if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
+if [ "$current_uid" -eq 0 ] && [ "$service_user" != "root" ]; then
     chown "$service_user" "$target_dir"
 fi
 
@@ -407,7 +386,6 @@ https://gh-proxy.com/${download_url}
 https://ghproxy.net/${download_url}
 "
 fi
-
 dl_ok=""
 for u in $download_urls; do
     log_step "Downloading $file_name ..."
@@ -425,9 +403,56 @@ if [ -z "$dl_ok" ]; then
     exit 1
 fi
 
+# Verify the downloaded binary against the checksum published by this repository.
+checksum_file="${target_dir}/SHA256SUMS.tmp"
+if [ -n "$github_proxy" ] || [ "$install_no_mirror" = "true" ]; then
+    checksum_urls="$checksum_url"
+else
+    checksum_urls="
+${checksum_url}
+https://ghfast.top/${checksum_url}
+https://gh-proxy.com/${checksum_url}
+https://ghproxy.net/${checksum_url}
+"
+fi
+checksum_ok=""
+for u in $checksum_urls; do
+    if curl -fsL --connect-timeout 15 -o "$checksum_file" "$u"; then
+        checksum_ok=1
+        break
+    fi
+done
+if [ -z "$checksum_ok" ]; then
+    rm -f "$komari_agent_path" "$checksum_file"
+    log_error "Failed to download SHA256SUMS"
+    exit 1
+fi
+expected_checksum=$(awk -v name="$file_name" '$2 == name { print $1; exit }' "$checksum_file")
+if [ -z "$expected_checksum" ]; then
+    rm -f "$komari_agent_path" "$checksum_file"
+    log_error "No checksum found for $file_name"
+    exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+    actual_checksum=$(sha256sum "$komari_agent_path" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+    actual_checksum=$(shasum -a 256 "$komari_agent_path" | awk '{print $1}')
+else
+    rm -f "$komari_agent_path" "$checksum_file"
+    log_error "No SHA-256 tool found (sha256sum or shasum)"
+    exit 1
+fi
+rm -f "$checksum_file"
+if [ "$actual_checksum" != "$expected_checksum" ]; then
+    rm -f "$komari_agent_path"
+    log_error "SHA-256 verification failed for $file_name"
+    exit 1
+fi
+log_success "SHA-256 verification passed"
+
 # Set executable permissions
 chmod +x "$komari_agent_path"
-if [ "$EUID" -eq 0 ] && [ "$service_user" != "root" ]; then
+if [ "$current_uid" -eq 0 ] && [ "$service_user" != "root" ]; then
     chown "$service_user" "$komari_agent_path"
 fi
 log_success "Komari-agent installed to ${GREEN}$komari_agent_path${NC}"
@@ -677,7 +702,7 @@ elif [ "$init_system" = "launchd" ]; then
     case "$target_dir" in
         /Users/*) is_user_install=true ;;
     esac
-    [ "$EUID" -ne 0 ] && is_user_install=true
+    [ "$current_uid" -ne 0 ] && is_user_install=true
     
     if [ "$is_user_install" = true ]; then
         # User-level service (LaunchAgent)
@@ -800,5 +825,3 @@ fi
 log_config "Service: ${GREEN}$service_name${NC}"
 log_config "Arguments: ${GREEN}$komari_args${NC}"
 echo -e "${WHITE}===========================================${NC}"
-
-

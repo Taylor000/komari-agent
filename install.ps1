@@ -9,11 +9,14 @@ function Log-Step { param([string]$Message) Write-Host "$Message"    -Foreground
 function Log-Config { param([string]$Message) Write-Host "- $Message"    -ForegroundColor White }
 
 # Default parameters
+$Repository = "Taylor000/komari-agent"
+$DefaultVersion = "1.2.0"
 $InstallDir = Join-Path $Env:ProgramFiles "Komari"
 $ServiceName = "komari-agent"
 $GitHubProxy = ""
 $KomariArgs = @()
-$InstallVersion = ""
+$InstallVersion = $DefaultVersion
+$EnableAutoUpdate = $false
 
 # Parse script arguments
 for ($i = 0; $i -lt $args.Count; $i++) {
@@ -22,8 +25,23 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         "--install-service-name" { $ServiceName = $args[$i + 1]; $i++; continue }
         "--install-ghproxy" { $GitHubProxy = $args[$i + 1]; $i++; continue }
         "--install-version" { $InstallVersion = $args[$i + 1]; $i++; continue }
+        "--install-enable-auto-update" { $EnableAutoUpdate = $true; continue }
         Default { $KomariArgs += $args[$i] }
     }
+}
+
+switch ($InstallVersion.ToLowerInvariant()) {
+    { $_ -in @("1.1.93", "1.93") } { $InstallVersion = "1.1.93"; break }
+    { $_ -in @("1.2.0", "1.20") } { $InstallVersion = "1.2.0"; break }
+    Default {
+        Log-Error "Unsupported agent version: $InstallVersion"
+        Log-Info "Supported versions: 1.1.93 and 1.2.0"
+        exit 1
+    }
+}
+
+if (-not $EnableAutoUpdate -and $KomariArgs -notcontains "--disable-auto-update") {
+    $KomariArgs += "--disable-auto-update"
 }
 
 # Ensure running as Administrator
@@ -161,11 +179,8 @@ Log-Config "Service name: $ServiceName"
 Log-Config "Install directory: $InstallDir"
 Log-Config "GitHub proxy: $ProxyDisplay"
 Log-Config "Agent arguments: $($KomariArgs -join ' ')"
-if ($InstallVersion -ne "") {
-    Log-Config "Specified agent version: $InstallVersion"
-} else {
-    Log-Config "Agent version: Latest"
-}
+Log-Config "Agent version: $InstallVersion"
+Log-Config "Release repository: $Repository"
 
 # Paths
 $BinaryName = "komari-agent-windows-$arch.exe"
@@ -206,84 +221,14 @@ function Uninstall-Previous {
 }
 Uninstall-Previous
 
-function Get-LatestSnapshotVersion {
-    param([Parameter(Mandatory = $true)][string]$AssetName)
-
-    $ApiUrl = "https://api.github.com/repos/komari-monitor/komari-agent/releases?per_page=100"
-    $ApiUrls = @($ApiUrl)
-    if ($GitHubProxy -ne "") {
-        $ApiUrls = @("$GitHubProxy/$ApiUrl", $ApiUrl)
-    }
-
-    for ($i = 0; $i -lt $ApiUrls.Count; $i++) {
-        try {
-            Log-Info "Fetching snapshot releases from GitHub API..."
-            $releases = Invoke-RestMethod -Uri $ApiUrls[$i] -UseBasicParsing
-        }
-        catch {
-            $releases = $null
-        }
-
-        if ($releases) {
-            $latestSnapshot = $releases |
-            Where-Object {
-                $_.draft -eq $false -and
-                $_.prerelease -eq $true -and
-                $_.tag_name -like "Snapshot-*" -and
-                (@($_.assets.name) -contains $AssetName)
-            } |
-            Sort-Object -Property @{ Expression = { [datetime]$_.published_at }; Descending = $true }, @{ Expression = { $_.tag_name }; Descending = $true } |
-            Select-Object -First 1
-
-            if ($latestSnapshot) {
-                return $latestSnapshot.tag_name
-            }
-        }
-
-        if ($i -lt ($ApiUrls.Count - 1)) {
-            Log-Warning "Failed to resolve snapshot releases through GitHub proxy, retrying directly."
-        }
-    }
-
-    throw "No snapshot release contains asset $AssetName."
-}
-
-$versionToInstall = ""
-if ($InstallVersion -ne "") {
-    Log-Info "Attempting to install specified version: $InstallVersion"
-    if ($InstallVersion -ieq "snapshot") {
-        Log-Info "Resolving the latest snapshot version..."
-        try {
-            $versionToInstall = Get-LatestSnapshotVersion -AssetName $BinaryName
-            Log-Success "Latest snapshot version fetched: $versionToInstall"
-        }
-        catch {
-            Log-Error "Failed to resolve the latest snapshot version: $_"
-            exit 1
-        }
-    }
-    else {
-        $versionToInstall = $InstallVersion
-    }
-}
-else {
-    $ApiUrl = "https://api.github.com/repos/komari-monitor/komari-agent/releases/latest"
-    try {
-        Log-Step "Fetching latest release version from GitHub API..."
-        $release = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing
-        $versionToInstall = $release.tag_name
-        Log-Success "Latest version fetched: $versionToInstall"
-    }
-    catch {
-        Log-Error "Failed to fetch latest version: $_"
-        exit 1
-    }
-}
+$versionToInstall = $InstallVersion
 Log-Success "Installing Komari Agent version: $versionToInstall"
 
 # Construct download URL
 $BinaryName = "komari-agent-windows-$arch.exe"
-$DownloadUrl = if ($GitHubProxy) { "$GitHubProxy/https://github.com/komari-monitor/komari-agent/releases/download/$versionToInstall/$BinaryName" } else { "https://github.com/komari-monitor/komari-agent/releases/download/$versionToInstall/$BinaryName" }
+$ReleaseBaseUrl = "https://github.com/$Repository/releases/download/$versionToInstall"
+$DownloadUrl = if ($GitHubProxy) { "$GitHubProxy/$ReleaseBaseUrl/$BinaryName" } else { "$ReleaseBaseUrl/$BinaryName" }
+$ChecksumUrl = if ($GitHubProxy) { "$GitHubProxy/$ReleaseBaseUrl/SHA256SUMS" } else { "$ReleaseBaseUrl/SHA256SUMS" }
 
 # Download and install
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -296,6 +241,30 @@ catch {
     exit 1
 }
 Log-Success "Downloaded and saved to $AgentPath"
+
+$ChecksumPath = Join-Path $InstallDir "SHA256SUMS.tmp"
+try {
+    Invoke-WebRequest -Uri $ChecksumUrl -OutFile $ChecksumPath -UseBasicParsing
+    $escapedBinaryName = [regex]::Escape($BinaryName)
+    $checksumLine = Get-Content $ChecksumPath | Where-Object { $_ -match "\s+\*?$escapedBinaryName$" } | Select-Object -First 1
+    if (-not $checksumLine) {
+        throw "No checksum found for $BinaryName"
+    }
+    $expectedHash = ($checksumLine -split '\s+')[0].ToLowerInvariant()
+    $actualHash = (Get-FileHash -Path $AgentPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $expectedHash) {
+        throw "SHA-256 verification failed for $BinaryName"
+    }
+    Log-Success "SHA-256 verification passed"
+}
+catch {
+    Remove-Item $AgentPath -Force -ErrorAction SilentlyContinue
+    Log-Error "Checksum verification failed: $_"
+    exit 1
+}
+finally {
+    Remove-Item $ChecksumPath -Force -ErrorAction SilentlyContinue
+}
 
 # Register and start service
 Log-Step "Configuring Windows service with nssm..."
