@@ -36,10 +36,13 @@ log_config() {
 }
 
 # Default values
+repository="Taylor000/komari-agent"
+default_version="1.2.0"
 service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
-install_version="" # New parameter for specifying version
+install_version="$default_version"
+enable_auto_update=false
  
 
 # Detect OS
@@ -90,6 +93,10 @@ while [[ $# -gt 0 ]]; do
             install_version="$2"
             shift 2
             ;;
+        --install-enable-auto-update)
+            enable_auto_update=true
+            shift
+            ;;
         --install*)
             log_warning "Unknown install parameter: $1"
             shift
@@ -104,6 +111,29 @@ done
 
 # Remove leading space from komari_args if present
 komari_args="${komari_args# }"
+
+# This self-hosted distribution intentionally supports only two frozen versions.
+case "$install_version" in
+    1.1.93|1.93)
+        install_version="1.1.93"
+        ;;
+    1.2.0|1.20)
+        install_version="1.2.0"
+        ;;
+    *)
+        log_error "Unsupported agent version: $install_version"
+        log_info "Supported versions: 1.1.93 and 1.2.0"
+        exit 1
+        ;;
+esac
+
+# Keep installations pinned unless auto-update is explicitly enabled.
+if [ "$enable_auto_update" != true ]; then
+    case " $komari_args " in
+        *" --disable-auto-update "*) ;;
+        *) komari_args="${komari_args:+$komari_args }--disable-auto-update" ;;
+    esac
+fi
 
 komari_agent_path="${target_dir}/agent"
 
@@ -129,11 +159,8 @@ log_config "  Service name: ${GREEN}$service_name${NC}"
 log_config "  Install directory: ${GREEN}$target_dir${NC}"
 log_config "  GitHub proxy: ${GREEN}${github_proxy:-"(direct)"}${NC}"
 log_config "  Binary arguments: ${GREEN}$komari_args${NC}"
-if [ -n "$install_version" ]; then
-    log_config "  Specified agent version: ${GREEN}$install_version${NC}"
-else
-    log_config "  Agent version: ${GREEN}Latest${NC}"
-fi
+log_config "  Agent version: ${GREEN}$install_version${NC}"
+log_config "  Release repository: ${GREEN}$repository${NC}"
 echo ""
 
 # Function to uninstall the previous installation
@@ -279,28 +306,26 @@ case $arch in
 esac
 log_info "Detected OS: ${GREEN}$os_name${NC}, Architecture: ${GREEN}$arch${NC}"
 
-version_to_install="latest"
-if [ -n "$install_version" ]; then
-    log_info "Attempting to install specified version: ${GREEN}$install_version${NC}"
-    version_to_install="$install_version"
-else
-    log_info "No version specified, installing the latest version."
-fi
+version_to_install="$install_version"
+log_info "Installing pinned version: ${GREEN}$version_to_install${NC}"
 
 # Construct download URL
 file_name="komari-agent-${os_name}-${arch}"
-if [ "$version_to_install" = "latest" ]; then
-    download_path="latest/download"
-else
-    download_path="download/${version_to_install}"
+if [ "$os_name" = "windows" ]; then
+    file_name="${file_name}.exe"
+    komari_agent_path="${komari_agent_path}.exe"
 fi
+download_path="download/${version_to_install}"
+release_base_url="https://github.com/${repository}/releases/${download_path}"
 
 if [ -n "$github_proxy" ]; then
     # Use proxy for GitHub releases
-    download_url="${github_proxy}/https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="${github_proxy}/${release_base_url}/${file_name}"
+    checksum_url="${github_proxy}/${release_base_url}/SHA256SUMS"
 else
     # Direct access to GitHub releases
-    download_url="https://github.com/komari-monitor/komari-agent/releases/${download_path}/${file_name}"
+    download_url="${release_base_url}/${file_name}"
+    checksum_url="${release_base_url}/SHA256SUMS"
 fi
 
 log_step "Creating installation directory: ${GREEN}$target_dir${NC}"
@@ -314,10 +339,40 @@ else
     log_step "Downloading $file_name directly..."
     log_info "URL: ${CYAN}$download_url${NC}"
 fi
-if ! curl -L -o "$komari_agent_path" "$download_url"; then
+if ! curl -fL -o "$komari_agent_path" "$download_url"; then
     log_error "Download failed"
     exit 1
 fi
+
+# Verify the downloaded binary against the checksum published by this repository.
+checksum_file="${target_dir}/SHA256SUMS.tmp"
+if ! curl -fsL -o "$checksum_file" "$checksum_url"; then
+    rm -f "$komari_agent_path" "$checksum_file"
+    log_error "Failed to download SHA256SUMS"
+    exit 1
+fi
+expected_checksum=$(awk -v name="$file_name" '$2 == name { print $1; exit }' "$checksum_file")
+if [ -z "$expected_checksum" ]; then
+    rm -f "$komari_agent_path" "$checksum_file"
+    log_error "No checksum found for $file_name"
+    exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+    actual_checksum=$(sha256sum "$komari_agent_path" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+    actual_checksum=$(shasum -a 256 "$komari_agent_path" | awk '{print $1}')
+else
+    rm -f "$komari_agent_path" "$checksum_file"
+    log_error "No SHA-256 tool found (sha256sum or shasum)"
+    exit 1
+fi
+rm -f "$checksum_file"
+if [ "$actual_checksum" != "$expected_checksum" ]; then
+    rm -f "$komari_agent_path"
+    log_error "SHA-256 verification failed for $file_name"
+    exit 1
+fi
+log_success "SHA-256 verification passed"
 
 # Set executable permissions
 chmod +x "$komari_agent_path"

@@ -1,17 +1,28 @@
-name: Release Binaries
+name: Publish supported agent
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Agent version to publish
+        required: true
+        type: choice
+        default: "1.2.0"
+        options:
+          - "1.2.0"
+          - "1.1.93"
 
 permissions:
   contents: write
 
-jobs:
-  build-and-attach:
-    runs-on: ubuntu-latest
+env:
+  RELEASE_REPOSITORY: Taylor000/komari-agent
 
+jobs:
+  build:
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         exclude:
           - goos: windows
@@ -24,39 +35,74 @@ jobs:
         goarch: [amd64, arm64, 386, arm]
 
     steps:
-      - name: Checkout code
+      - name: Checkout frozen source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version-file: go.mod
 
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
-          VERSION: ${{ github.event.release.tag_name }}
+          VERSION: ${{ inputs.version }}
         run: |
-          BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME=${BINARY_NAME}.exe
-          elif [ "${{ matrix.goos }}" = "darwin" ]; then
-            # macOS binaries typically do not have a file extension
-            true
+          BINARY_NAME="komari-agent-${GOOS}-${GOARCH}"
+          if [ "$GOOS" = "windows" ]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
           fi
-            go build -trimpath -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION}" -o $BINARY_NAME
+          go build -trimpath \
+            -ldflags="-X github.com/komari-monitor/komari-agent/update.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari-agent/update.Repo=${RELEASE_REPOSITORY}" \
+            -o "$BINARY_NAME"
 
-      - name: Upload binary to release
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: komari-agent-*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: agent-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum komari-agent-* > SHA256SUMS
+
+      - name: Create release when missing
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
         run: |
-          BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            BINARY_NAME=${BINARY_NAME}.exe
-          elif [ "${{ matrix.goos }}" = "darwin" ]; then
-            true
+          if ! gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "Komari Agent $VERSION" \
+              --notes "Self-hosted mirror of Komari Agent $VERSION. Binaries update only from $RELEASE_REPOSITORY."
           fi
-          gh release upload ${{ github.event.release.tag_name }} $BINARY_NAME --repo ${{ github.repository }}
-        shell: bash
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh release upload "$VERSION" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Mark 1.2.0 as latest
+        if: ${{ inputs.version == '1.2.0' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "1.2.0" --latest --repo "$GITHUB_REPOSITORY"
