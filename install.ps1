@@ -10,7 +10,7 @@ function Log-Config { param([string]$Message) Write-Host "- $Message"    -Foregr
 
 # Default parameters
 $Repository = "Taylor000/komari-agent"
-$DefaultVersion = "1.2.0"
+$DefaultVersion = "1.1.93"
 $InstallDir = Join-Path $Env:ProgramFiles "Komari"
 $ServiceName = "komari-agent"
 $GitHubProxy = ""

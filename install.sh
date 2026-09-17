@@ -40,7 +40,7 @@ current_uid=$(id -u)
 
 # Default values
 repository="Taylor000/komari-agent"
-default_version="1.2.0"
+default_version="1.1.93"
 service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
