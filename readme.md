@@ -39,4 +39,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.git
 
 请将 `YOUR_AGENT_TOKEN` 替换为实际 Token；不要将真实 Token 提交到公开仓库。
 
-安装后默认关闭自动更新。所有二进制均从本仓库 Release 下载并校验 SHA-256。
+安装后强制关闭自动更新。所有 Agent 二进制均从本仓库 Release 下载并校验 SHA-256；Windows 所需的 NSSM 也已固定归档在本仓库。
+
+本仓库不使用 GitHub Actions，也不会跟随上游更新。安装和运行时不依赖 `komari-monitor` 仓库。
+
+版本参数也兼容简写：`1.93` 等同于 `1.1.93`，`1.20` 等同于 `1.2.0`。

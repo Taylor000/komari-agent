@@ -16,7 +16,6 @@ $ServiceName = "komari-agent"
 $GitHubProxy = ""
 $KomariArgs = @()
 $InstallVersion = $DefaultVersion
-$EnableAutoUpdate = $false
 
 # Parse script arguments
 for ($i = 0; $i -lt $args.Count; $i++) {
@@ -25,7 +24,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         "--install-service-name" { $ServiceName = $args[$i + 1]; $i++; continue }
         "--install-ghproxy" { $GitHubProxy = $args[$i + 1]; $i++; continue }
         "--install-version" { $InstallVersion = $args[$i + 1]; $i++; continue }
-        "--install-enable-auto-update" { $EnableAutoUpdate = $true; continue }
+        "--install-enable-auto-update" { Log-Warning "This frozen distribution does not enable auto-update; ignoring this option"; continue }
         Default { $KomariArgs += $args[$i] }
     }
 }
@@ -40,7 +39,7 @@ switch ($InstallVersion.ToLowerInvariant()) {
     }
 }
 
-if (-not $EnableAutoUpdate -and $KomariArgs -notcontains "--disable-auto-update") {
+if ($KomariArgs -notcontains "--disable-auto-update") {
     $KomariArgs += "--disable-auto-update"
 }
 
@@ -108,13 +107,19 @@ if (-not $nssmCmd) {
 if (-not $nssmCmd) {
     Log-Info "nssm not found or not usable. Attempting to download to $InstallDir..."
     $NssmVersion = "2.24"
-    $NssmZipUrl = "https://nssm.cc/release/nssm-$NssmVersion.zip"
+    $NssmZipUrl = "https://raw.githubusercontent.com/$Repository/refs/heads/main/vendor/nssm-$NssmVersion.zip"
+    $NssmZipSha256 = "727d1e42275c605e0f04aba98095c38a8e1e46def453cdffce42869428aa6743"
     $TempNssmZipPath = Join-Path $env:TEMP "nssm-$NssmVersion.zip"
     $TempExtractDir = Join-Path $env:TEMP "nssm_extract_temp"
 
     try {
         Log-Info "Downloading nssm from $NssmZipUrl..."
         Invoke-WebRequest -Uri $NssmZipUrl -OutFile $TempNssmZipPath -UseBasicParsing
+
+        $NssmActualSha256 = (Get-FileHash -Path $TempNssmZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($NssmActualSha256 -ne $NssmZipSha256) {
+            throw "SHA-256 verification failed for nssm-$NssmVersion.zip"
+        }
 
         if (Test-Path $TempExtractDir) { Remove-Item -Recurse -Force $TempExtractDir }
         New-Item -ItemType Directory -Path $TempExtractDir -Force | Out-Null
@@ -137,7 +142,7 @@ if (-not $nssmCmd) {
                 $NssmSourceExePath = $foundNssmFallback.FullName
             }
             else {
-                Log-Error "nssm.exe ($NssmArchSubDir) still not found in $TempExtractDir. Please install nssm manually (from https://nssm.cc) and ensure it's in your PATH."
+                Log-Error "nssm.exe ($NssmArchSubDir) still not found in $TempExtractDir."
                 exit 1
             }
         }
@@ -156,7 +161,7 @@ if (-not $nssmCmd) {
     }
     catch {
         Log-Error "Failed to download or configure nssm: $_"
-        Log-Error "Please install nssm manually from https://nssm.cc and ensure nssm.exe is in your PATH."
+        Log-Error "The archived nssm package could not be installed."
         exit 1
     }
     finally {

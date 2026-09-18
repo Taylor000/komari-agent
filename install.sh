@@ -49,7 +49,6 @@ install_dir_specified=false
 install_no_mirror=false # 关闭自动加速镜像
 service_user="${SUDO_USER:-$(id -un)}"
 user_service=false
-enable_auto_update=false
 
 # Detect OS
 os_type=$(uname -s)
@@ -106,7 +105,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --install-enable-auto-update)
-            enable_auto_update=true
+            log_warning "This frozen distribution does not enable auto-update; ignoring $1"
             shift
             ;;
         --install*)
@@ -148,13 +147,11 @@ case "$install_version" in
         ;;
 esac
 
-# Keep installations pinned unless auto-update is explicitly enabled.
-if [ "$enable_auto_update" != true ]; then
-    case " $komari_args " in
-        *" --disable-auto-update "*) ;;
-        *) komari_args="${komari_args:+$komari_args }--disable-auto-update" ;;
-    esac
-fi
+# This frozen distribution never performs automatic updates.
+case " $komari_args " in
+    *" --disable-auto-update "*) ;;
+    *) komari_args="${komari_args:+$komari_args }--disable-auto-update" ;;
+esac
 
 komari_agent_path="${target_dir}/agent"
 
